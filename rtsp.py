@@ -419,10 +419,38 @@ class WFDParams:
                     self.video_codecs.append(VideoCodec(native, c))
             elif param == 'wfd_audio_codecs':
                 pass
+            elif param == 'wfd_display_edid':
+                if val == 'none':
+                    # No edid (and reporting not supported)
+                    self.edid = None
+                    continue
+
+                length, edid = val.split(maxsplit=1)
+                edid = edid.strip()
+                try:
+                    length = int(length)
+                    if length == 0 and edid != "none":
+                        print('ERROR: EDID must have a value of "none" if length is zero')
+
+                    if len(edid) != 128 * 2 * length:
+                        print('ERROR: EDID hex string should be %d characters but is %d characters' % (128 * 2 * length, len(edid)))
+                except ValueError:
+                    print("ERROR: Could not parse EDID length")
+                    self.edid = None
+                    continue
+
+                if edid == 'none':
+                    # No edid but reporting is supported
+                    self.edid = None
+                    continue
+
+                self.edid = bytes.fromhex(edid)
 
     def m3_query_params(self):
         # TODO: Query more than just the mandatory parameters!
-        params = self.m3_mandatory
+        params = self.m3_mandatory[:]
+
+        params.append(b'wfd_display_edid')
 
         return b'\r\n'.join(params) + b'\r\n'
 
