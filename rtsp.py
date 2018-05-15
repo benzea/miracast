@@ -269,7 +269,7 @@ class VideoCodec:
 
         return resolutions
 
-    def find_resolutions(self):
+    def get_resolutions(self):
         resolutions = []
         resolutions.extend(self._get_resolutions(0x0))
         resolutions.extend(self._get_resolutions(0x1))
@@ -284,10 +284,10 @@ class VideoCodec:
         return self.native
 
     def find_best_resolution(self):
-        return self.find_resolutions[0]
+        return self.get_resolutions()[0]
 
     def find_resolution(self, width, height, framerate=None, interlaced=None):
-        resolutions = self.find_resolutions()
+        resolutions = self.get_resolutions()
 
         for r in resolutions:
             if r[0] != width or r[1] != height:
