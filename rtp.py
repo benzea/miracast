@@ -46,7 +46,7 @@ class WFDMedia(GstRtspServer.RTSPMedia):
             codec = cls._find_codec(params, profile='CHP')
 
         print('Using codec with resolutions:', codec.get_resolutions())
-        print('Native:', codec.get_native_resolution())
+        print('Reported native resolution:', codec.get_native_resolution())
         resolution = codec.find_best_resolution()
 
         codec = copy.copy(codec)
@@ -61,6 +61,8 @@ class WFDMedia(GstRtspServer.RTSPMedia):
         codec = params.selected_codec
         resolution = params.selected_resolution
 
+        # TODO: Fixup the GstFramerate object in introspection data, we need to
+        #       set it through from_string as is.
         caps = Gst.Caps.from_string("video/x-raw,framerate=%d/1" % resolution[2])
         caps.set_value("width", resolution[0])
         caps.set_value("height", resolution[1])
@@ -72,6 +74,19 @@ class WFDMedia(GstRtspServer.RTSPMedia):
         self.encoder.props.max_bitrate = codec.max_vcl_bitrate_kbit * 1024
         # XXX: Should be set in relation to both the codec bitrate and wifi throughput
         self.encoder.props.bitrate = int(self.encoder.props.max_bitrate)
+
+        # Unlink all pads that might be connected to the interlacer
+        #  convert (-> interlace) -> encoder
+        self.convert.unlink(self.encoder)
+        self.convert.unlink(self.interlace)
+        self.interlace.unlink(self.encoder)
+        if resolution[3]:
+            # Insert the interlace
+            self.convert.link(self.interlace)
+            self.interlace.link(self.encoder)
+        else:
+            # Relink directly
+            self.convert.link(self.encoder)
 
         print('Configured video to %dx%dpx, framerate: %d, interlaced: %d, frameskip: %d, max-bitrate: %d kbit/s, bitrate: %d kbit/s' % (resolution[0], resolution[1], resolution[2], int(resolution[3]), int(codec.frame_skipping_allowed), codec.max_vcl_bitrate_kbit, self.encoder.props.bitrate // 1024))
 
@@ -93,9 +108,13 @@ class WFDMedia(GstRtspServer.RTSPMedia):
         assert src.link(self.size_filter)
 
         # Convert video to correct color space
-        convert = Gst.ElementFactory.make("autovideoconvert")
-        wfdbin.add(convert)
-        assert self.size_filter.link(convert)
+        self.convert = Gst.ElementFactory.make("autovideoconvert")
+        wfdbin.add(self.convert)
+        assert self.size_filter.link(self.convert)
+
+        self.interlace = Gst.ElementFactory.make("interlace")
+        self.interlace.props.field_pattern = '1:1'
+        wfdbin.add(self.interlace)
 
         # Encode video with H264 using openh264
         self.encoder = Gst.ElementFactory.make("openh264enc")
@@ -106,7 +125,7 @@ class WFDMedia(GstRtspServer.RTSPMedia):
         self.encoder.props.enable_frame_skip = False
 
         wfdbin.add(self.encoder)
-        assert convert.link(self.encoder)
+        assert self.convert.link(self.encoder)
 
         # This is from miraclecast, I am not sure whether muxing into mpeg2 TS
         # is really necessary here.
