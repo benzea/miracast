@@ -46,7 +46,10 @@ class WpaSupplicant:
         self.supplicant_props = dbus.Interface(obj, dbus_interface='org.freedesktop.DBus.Properties')
         self.supplicant_iface = dbus.Interface(obj, dbus_interface='fi.w1.wpa_supplicant1')
 
-        self.interface = self.supplicant_props.Get('fi.w1.wpa_supplicant1', 'Interfaces')[0]
+        # XXX: Use the lowest interface number, assuming that is a persistent one
+        interfaces = self.supplicant_props.Get('fi.w1.wpa_supplicant1', 'Interfaces')
+        interfaces.sort()
+        self.interface = interfaces[0]
 
         self.wdev = self.bus.get_object('fi.w1.wpa_supplicant1', self.interface)
         self.wdev_props = dbus.Interface(self.wdev, dbus_interface='org.freedesktop.DBus.Properties')
