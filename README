@@ -1,0 +1,15 @@
+Miracast sending support for the Linux Desktop
+
+Describes the status as of 2018-05-15, things will have changed considerably since then.
+
+Current approach:
+ * Python userspace program that just streams a test image
+ * Program speaks directly with wpa_supplicant through dbus (bypassing NetworkManager)
+ * Program tries to become group owner
+
+Caveats:
+ * Firewall may need to be adjusted for DHCP server
+ * Does not properly reset state when killing (destruction of P2P Group)
+ * Does not react to P2P group creation
+ * Cannot start the DHCP server (or client) because of this
+ * No support for audio streaming so far
