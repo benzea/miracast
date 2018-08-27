@@ -187,6 +187,10 @@ class VideoCodec:
         #self.max_hres = int(descr[9], 16) if descr[9] != 'none' else None
         #self.max_vres = int(descr[10], 16) if descr[10] != 'none' else None
 
+    @property
+    def num_slices(self):
+        return (self.slice_enc_params & 0x1ff) + 1
+
     def get_profile(self):
         if self._profile == 0x01:
             return 'CBP'
@@ -232,9 +236,13 @@ class VideoCodec:
     def max_slices(self):
         return self.slice_enc_params & 0x1f + 1
 
-    @property
-    def frame_skipping_allowed(self):
+    def get_frame_skipping_allowed(self):
         return bool(self.frame_rate_ctrl_sup & 0x1)
+
+    def set_frame_skipping_allowed(self, value):
+        self.frame_rate_ctrl_sup = (self.frame_rate_ctrl_sup & 0xfffe) | int(bool(value))
+
+    frame_skipping_allowed = property(get_frame_skipping_allowed, set_frame_skipping_allowed)
 
     def max_skip_interval(self):
         """Returns the maximum time that may be skipped. Returns -1 if there
@@ -302,7 +310,7 @@ class VideoCodec:
 
     def descr_for_resolution(self, r):
         # We only support base profile
-        profile = 0x01 # self._profile
+        profile = self._profile
         level = self.level
 
         sup = 1 << r[5]
@@ -385,8 +393,6 @@ class WFDParams:
             param = option[0]
             val = option[1].strip()
             params[param] = val
-
-        print('Setting parameters:', params)
 
         for param, val in params.items():
             if param == 'wfd_client_rtp_ports':
@@ -559,6 +565,8 @@ class WFDClient(GstRtspServer.RTSPClient):
 
     def do_configure_client_media(self, media, stream, ctx):
         print('Configuring media')
+        # Store media object for other actions
+        self.wfd_media = media
         media.wfd_configure(self.params)
 
         if not GstRtspServer.RTSPClient.do_configure_client_media(self, media, stream, ctx):
@@ -611,7 +619,16 @@ class WFDClient(GstRtspServer.RTSPClient):
             print('WARNING: Not supporting some options: %s' % ', '.join(unsupported))
         return ', '.join(unsupported)
 
-    def do_params_set(self, ctx):
+#    def do_pre_set_parameter_request(self, ctx):
+#        print('got a set parameter request', ctx)
+#        print('causing error response')
+#        return GstRtsp.RTSPStatusCode.OPTION_NOT_SUPPORTED
+
+#    #def do_set_parameter_request(self, ctx):
+#    #    print('got a set parameter request', ctx)
+
+    # Implementing this causes issues … big issues
+    def do_params_set(self, ctx, response):
         # The following parameters may be set here:
         #  * wfd-connector-type
         #  * wfd-standby
@@ -619,30 +636,39 @@ class WFDClient(GstRtspServer.RTSPClient):
         #  * wfd-uibc-capability
         #  * wfd-uibc-setting
 
-        print('Got params request')
+        response.init_response(GstRtsp.RTSPResult.OK, None, ctx.request)
+
         status, body = ctx.request.get_body()
+        body = body.strip(b'\x00')
+        print(body)
         # This should never happen, as it will already be filtered in that case
         if not body:
-            return
+            return GstRtsp.RTSPResult.OK
 
         params = {}
 
         # Params are separated by CRLF, just split on LF and strip
         for option in body.split(b'\n'):
-            option = str(option)
+            option = option.decode('ascii')
             option = option.strip()
+            print(option)
             # Ignore empty lines
             if not option:
                 continue
             option = option.split(':', 1)
             if len(option) != 2:
-                # XXX: Error
-                continue
+                val = None
+            else:
+                val = option[1].strip()
             param = option[0]
-            val = option[1].strip()
             params[param] = val
 
-        for param, val in params:
+        print(params)
+        # Just set the body to confirm all options
+        response.set_body(('\r\n'.join(params.keys())+'\r\n').encode('ascii'))
+
+
+        for param, val in params.items():
             if param == 'wfd_trigger_method':
                 print('ERROR: The WFD sink may not trigger any methods!')
             elif param == 'wfd_route':
@@ -662,9 +688,12 @@ class WFDClient(GstRtspServer.RTSPClient):
             elif param == 'wfd_standby':
                 pass
             elif param == 'wfd_idr_request':
-                pass
+                print('GOT IDR REQUEST!')
+                self.wfd_media.force_keyframe()
             elif param == 'wfd_uibc_capability':
                 pass
+
+        return GstRtsp.RTSPResult.OK
 
 class WFDServer(GstRtspServer.RTSPServer):
 
@@ -679,6 +708,7 @@ class WFDServer(GstRtspServer.RTSPServer):
         # TODO: Allow using another port!
         self.set_address("0.0.0.0")
         self.set_service("7236")
+        self.ifname = None
 
         self.connect("client-connected", self.client_connected_cb)
 
@@ -693,9 +723,33 @@ class WFDServer(GstRtspServer.RTSPServer):
 
         # WFD is a bit special and the server should query parameters right
         # away. Trigger this here.
-        # Add an idle handler to query the parameters as the client is not
-        # attached at this point
+        # Delay the whole thing a bit as the client is not attached at this
+        # point.
         GLib.timeout_add(500, lambda : client.wfd_query_support())
+
+    def set_interface(self, ifname):
+        self.ifname = ifname
+
+#    def attach():
+#        # We need to override the attach function as we only want to bind on
+#        # the newly create interface rather than all interfaces.
+#        conn = Gio.NetworService (self.props.service, "tcp", self.props.address)
+#        enumerator = conn.enumerate()
+
+#        while True:
+#            sockaddr = enumerator.next()
+#            assert sockaddr is not None
+
+#            socket = Gio.Socket(sockaddr.get_family(),
+#                                Gio.SocketType.STREAM,
+#                                Gio.SocketProtocol.TCP)
+
+#            if socket is None:
+#                continue
+
+#            fd = socket.get_fd()
+#            if self.ifname is not None:
+#                ifidx =
 
     def do_create_client(self):
         # XXX: Upstream the required patches for bindings to exist!
@@ -714,14 +768,15 @@ if __name__ == '__main__':
     from dbus.mainloop.glib import DBusGMainLoop
     DBusGMainLoop(set_as_default=True)
 
+    import sys
+
     import wfd
     source_ies = wfd.WFDSourceIEs()
     source_ies.port = 7236
 
-    Gst.init()
+    Gst.init(sys.argv)
 
     server = WFDServer()
-
     server.attach()
 
     supplicant = wfd.WpaSupplicant()
@@ -731,6 +786,11 @@ if __name__ == '__main__':
     supplicant.discover()
 
     import sys
+
+    def p2p_device_ready(supplicant, ifname):
+        print("P2P device is ready!")
+        server.set_interface(ifname)
+        #server.attach()
 
     def after_discover():
         if len(sys.argv) != 3:

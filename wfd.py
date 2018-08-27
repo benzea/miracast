@@ -1,7 +1,8 @@
 
 import struct
 import dbus
-
+import atexit
+from gi.repository import GObject
 
 class WFDSourceIEs:
     def __init__(self):
@@ -59,10 +60,41 @@ class WpaSupplicant:
 
         self.p2pdev.connect_to_signal('GroupStarted', self.group_started)
 
+    @GObject.Signal(arg_types=(str,))
+    def p2p_device_ready(self, ifname):
+        pass
+
+    def group_destroy(self):
+        if not hasattr(self, 'group'):
+            return
+
+        # Call disconnect on the groups iface, effectively destroying it
+        iface = dbus.Interface(self.group_iface, 'fi.w1.wpa_supplicant1.Interface.P2PDevice')
+        iface.Disconnect()
+        del self.group
+        del self.group_iface
+        del self.group_iface_props
+        del self.group_ifname
+
     def group_started(self, properties):
+        # Destroy any previously existing group
+        self.group_destroy()
+
         self.group_path = properties['group_object']
         print('Group started %s' % self.group_path)
         print(properties)
+
+        self.group = self.bus.get_object('fi.w1.wpa_supplicant1', properties['group_object'])
+        self.group_iface = self.bus.get_object('fi.w1.wpa_supplicant1', properties['interface_object'])
+        self.group_iface_props = dbus.Interface(self.group_iface, dbus_interface='org.freedesktop.DBus.Properties')
+        self.group_ifname = self.group_iface_props.Get('fi.w1.wpa_supplicant1.Interface', 'Ifname')
+
+        self.group_role = properties['role']
+
+        self.p2p_device_ready(self.group_ifname)
+
+        print('Group started on %s with role %s' % (self.group_ifname, self.group_role))
+        atexit.register(self.group_destroy)
 
     def set_wfd_sub_elems(self, elems):
         if elems is None:
@@ -93,9 +125,11 @@ class WpaSupplicant:
         args = dbus.Dictionary(signature='sv')
         if pin == 'pbc':
             args['wps_method'] = 'pbc'
+            wps_type = "pbc"
         else:
             args['pin'] = pin
             args['wps_method'] = 'pin'
+            wps_type = "display"
 
         args['peer'] = self.peer
         args['join'] = False
@@ -104,9 +138,9 @@ class WpaSupplicant:
 
         print('Triggering connect, pin: %s, peer: %s' % (pin, self.peer))
 
-        self.p2pdev.ProvisionDiscoveryRequest(self.peer, "display")
+        self.p2pdev.ProvisionDiscoveryRequest(self.peer, wps_type)
         import time
-        time.sleep(2)
+        time.sleep(1)
         self.p2pdev.Connect(args)
 
 
