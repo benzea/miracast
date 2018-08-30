@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 
 import gi
 from enum import Enum
