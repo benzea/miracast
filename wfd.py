@@ -1,8 +1,11 @@
 
 import struct
 import dbus
-import atexit
-from gi.repository import GObject
+
+import gi
+gi.require_version('NM', '1.0')
+
+from gi.repository import GObject, NM, GLib
 
 class WFDSourceIEs:
     def __init__(self):
@@ -41,60 +44,19 @@ class WFDSourceIEs:
 class WpaSupplicant:
     def __init__(self):
 
-        self.bus = dbus.SystemBus()
+        self.nm = NM.Client()
+        self.nm.init()
+        for dev in self.nm.get_all_devices():
+            if isinstance(dev, NM.DeviceP2PWifi):
+                self.dev = dev
+                break
+        else:
+            raise AssertionError("No P2P Wifi device was found!")
 
-        obj = self.bus.get_object('fi.w1.wpa_supplicant1', '/fi/w1/wpa_supplicant1')
-        self.supplicant_props = dbus.Interface(obj, dbus_interface='org.freedesktop.DBus.Properties')
-        self.supplicant_iface = dbus.Interface(obj, dbus_interface='fi.w1.wpa_supplicant1')
-
-        # XXX: Use the lowest interface number, assuming that is a persistent one
-        interfaces = self.supplicant_props.Get('fi.w1.wpa_supplicant1', 'Interfaces')
-        interfaces.sort()
-        self.interface = interfaces[0]
-
-        self.wdev = self.bus.get_object('fi.w1.wpa_supplicant1', self.interface)
-        self.wdev_props = dbus.Interface(self.wdev, dbus_interface='org.freedesktop.DBus.Properties')
-        self.p2pdev = dbus.Interface(self.wdev, dbus_interface='fi.w1.wpa_supplicant1.Interface.P2PDevice')
-
-        self.supplicant_props.Set('fi.w1.wpa_supplicant1', 'DebugLevel', 'debug')
-
-        self.p2pdev.connect_to_signal('GroupStarted', self.group_started)
-
-    @GObject.Signal(arg_types=(str,))
-    def p2p_device_ready(self, ifname):
-        pass
-
-    def group_destroy(self):
-        if not hasattr(self, 'group'):
-            return
-
-        # Call disconnect on the groups iface, effectively destroying it
-        iface = dbus.Interface(self.group_iface, 'fi.w1.wpa_supplicant1.Interface.P2PDevice')
-        iface.Disconnect()
-        del self.group
-        del self.group_iface
-        del self.group_iface_props
-        del self.group_ifname
-
-    def group_started(self, properties):
-        # Destroy any previously existing group
-        self.group_destroy()
-
-        self.group_path = properties['group_object']
-        print('Group started %s' % self.group_path)
-        print(properties)
-
-        self.group = self.bus.get_object('fi.w1.wpa_supplicant1', properties['group_object'])
-        self.group_iface = self.bus.get_object('fi.w1.wpa_supplicant1', properties['interface_object'])
-        self.group_iface_props = dbus.Interface(self.group_iface, dbus_interface='org.freedesktop.DBus.Properties')
-        self.group_ifname = self.group_iface_props.Get('fi.w1.wpa_supplicant1.Interface', 'Ifname')
-
-        self.group_role = properties['role']
-
-        self.p2p_device_ready(self.group_ifname)
-
-        print('Group started on %s with role %s' % (self.group_ifname, self.group_role))
-        atexit.register(self.group_destroy)
+    def disconnect(self):
+        ac = self.dev.get_active_connection()
+        if ac:
+            self.nm.deactivate_connection (ac)
 
     def set_wfd_sub_elems(self, elems):
         if elems is None:
@@ -103,44 +65,32 @@ class WpaSupplicant:
             elems = elems.to_bytes()
         elems = list(elems)
 
-        self.supplicant_props.Set('fi.w1.wpa_supplicant1', 'WFDIEs', dbus.Array(elems, signature='y'))
+        #self.supplicant_props.Set('fi.w1.wpa_supplicant1', 'WFDIEs', dbus.Array(elems, signature='y'))
+        print("Not setting WFDIEs currently as it is not yet supported in NM")
 
     def discover(self):
-        self.p2pdev.Find(dbus.Dictionary(signature='sv'))
+        self.dev.start_find()
+
+    def _p2p_connect(self, client, res):
+        ac = self.nm.add_and_activate_connection_options_finish(res)
 
     def p2p_connect(self, mac, pin):
         mac = mac.replace(':', '')
         mac = mac.lower()
 
-        self.peer = dbus.ObjectPath(self.interface + '/Peers/' + mac)
-        peers = self.wdev_props.Get('fi.w1.wpa_supplicant1.Interface.P2PDevice', 'Peers')
-        for peer in peers:
-            if peer.endswith(mac):
-                self.peer = peer
+        for peer in self.dev.props.peers:
+            peer_mac = peer.props.hw_address.replace(':', '')
+            peer_mac = mac.lower()
+            if peer_mac == mac:
                 break
         else:
             print('Peer with mac address %s not found' % mac)
             return
 
-        args = dbus.Dictionary(signature='sv')
-        if pin == 'pbc':
-            args['wps_method'] = 'pbc'
-            wps_type = "pbc"
-        else:
-            args['pin'] = pin
-            args['wps_method'] = 'pin'
-            wps_type = "display"
+        options = GLib.Variant('a{sv}', {
+            'persist': GLib.Variant('s', 'volatile'),
+            'bind': GLib.Variant('s', 'dbus-client'),
+        })
 
-        args['peer'] = self.peer
-        args['join'] = False
-        args['persistent'] = False
-        args['go_intent'] = 15
-
-        print('Triggering connect, pin: %s, peer: %s' % (pin, self.peer))
-
-        self.p2pdev.ProvisionDiscoveryRequest(self.peer, wps_type)
-        import time
-        time.sleep(1)
-        self.p2pdev.Connect(args)
-
+        self.nm.add_and_activate_connection_options_async(None, self.dev, specific_object=peer.get_path(), callback=self._p2p_connect, options=options)
 
